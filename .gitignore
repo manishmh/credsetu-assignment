@@ -1,0 +1,36 @@
+# Secrets & local config
+.env
+backend/.env
+mobile/.env
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+backend/node_modules/
+mobile/node_modules/
+
+# Build output
+backend/dist/
+mobile/dist/
+.expo/
+*.hbc
+*.bundle
+
+# Uploads & local data (receipts must never be committed)
+backend/uploads/
+
+# DB / Docker
+pgdata/
+*.sqlite
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Test artifacts
+coverage/
