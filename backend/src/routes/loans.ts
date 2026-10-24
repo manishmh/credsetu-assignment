@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { NextFunction, Request, Response, Router } from "express";
 import Decimal from "decimal.js";
 import fs from "fs";
 import multer from "multer";
@@ -120,21 +120,41 @@ const upload = multer({
   limits: { fileSize: config.maxReceiptBytes },
   fileFilter: (_req, file, cb) => {
     const ok = ["image/jpeg", "image/png", "image/webp", "image/heic", "application/pdf"].includes(file.mimetype);
-    if (!ok) return cb(new Error("Only JPEG/PNG/WebP/HEIC images or PDF receipts are allowed"));
+    if (!ok) return cb(new Error("INVALID_FILE_TYPE:Only JPEG/PNG/WebP/HEIC images or PDF receipts are allowed"));
     cb(null, true);
   },
 });
 
-loansRouter.post("/:id/receipt", upload.single("receipt"), async (req: AuthRequest, res, next) => {
+// Convert multer errors into consistent JSON responses instead of HTML/500s.
+function uploadSingleReceipt(req: AuthRequest, res: Response, next: NextFunction) {
+  upload.single("receipt")(req as unknown as Request, res as unknown as Response, (err: unknown) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      console.warn(`[receipt] rejected oversized upload loan=${req.params.id} user=${req.userId}`);
+      return res.status(413).json({
+        error: { code: "FILE_TOO_LARGE", message: `Receipt must be smaller than ${config.maxReceiptBytes / 1024 / 1024} MB` },
+      });
+    }
+    const message = err instanceof Error ? err.message : "Invalid receipt file";
+    const code = message.startsWith("INVALID_FILE_TYPE:") ? "INVALID_FILE_TYPE" : "INVALID_FILE";
+    const clean = message.includes(":") ? message.slice(message.indexOf(":") + 1) : message;
+    console.warn(`[receipt] rejected upload loan=${req.params.id} user=${req.userId} reason=${clean}`);
+    return res.status(400).json({ error: { code, message: clean } });
+  });
+}
+
+loansRouter.post("/:id/receipt", uploadSingleReceipt, async (req: AuthRequest, res, next) => {
   try {
     const loan = await prisma.loan.findFirst({ where: { id: req.params.id, userId: req.userId! } });
     if (!loan) {
       if (req.file) fs.unlink(req.file.path, () => {});
       return res.status(404).json({ error: { code: "NOT_FOUND", message: "Loan not found" } });
     }
-    if (!req.file) return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "No receipt file uploaded" } });
+    if (!req.file) return res.status(400).json({ error: { code: "MISSING_FILE", message: "No receipt file uploaded. Attach an image or PDF as the 'receipt' field." } });
     const receiptUrl = `/uploads/${path.basename(req.file.path)}`;
     const updated = await prisma.loan.update({ where: { id: loan.id }, data: { receiptUrl } });
+    // Diagnostic log without secrets/PII: ids, mime, size only.
+    console.log(`[receipt] stored loan=${loan.id} file=${path.basename(req.file.path)} mime=${req.file.mimetype} bytes=${req.file.size}`);
     res.json({ ok: true, loan: serializeLoan(updated) });
   } catch (e) {
     next(e);

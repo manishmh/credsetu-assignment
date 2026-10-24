@@ -1,5 +1,5 @@
 import React from "react";
-import { ActivityIndicator, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { theme } from "../theme";
 
 export function Button({ title, onPress, disabled, loading, danger, secondary }: {
@@ -55,7 +55,15 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.55 },
   btnText: { color: "#fff", fontWeight: "700", fontSize: 16 },
   secondaryText: { color: theme.colors.accent },
-  card: { backgroundColor: theme.colors.card, borderRadius: theme.radius, padding: theme.pad, shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
+  card: {
+    backgroundColor: theme.colors.card,
+    borderRadius: theme.radius,
+    padding: theme.pad,
+    ...Platform.select({
+      web: { boxShadow: "0 2px 8px rgba(0,0,0,0.06)" } as object,
+      default: { shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 } as object,
+    }),
+  },
   label: { fontSize: 13, fontWeight: "600", color: theme.colors.muted, marginBottom: 6 },
   input: { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 12, fontSize: 16, color: theme.colors.text, backgroundColor: "#fff" },
   disabledInput: { backgroundColor: theme.colors.bg },

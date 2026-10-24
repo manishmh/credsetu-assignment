@@ -1,16 +1,31 @@
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Image, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { api, Loan } from "../api/client";
 import { fmtDate, inr, theme } from "../theme";
 import { Button, Card, StatusPill } from "../components/ui";
+
+interface PendingReceipt {
+  uri: string;
+  name: string;
+  mime: string;
+}
+
+function receiptName(asset: { fileName?: string | null; mimeType?: string | null; uri: string }): { name: string; mime: string } {
+  const mime = asset.mimeType ?? "image/jpeg";
+  const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "application/pdf" ? "pdf" : "jpg";
+  return { name: asset.fileName ?? `receipt-${Date.now()}.${ext}`, mime };
+}
 
 export function LoanDetailScreen({ loanId, onBack, onChanged }: { loanId: string; onBack: () => void; onChanged: () => void }) {
   const [loan, setLoan] = useState<Loan | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [pending, setPending] = useState<PendingReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -30,11 +45,17 @@ export function LoanDetailScreen({ loanId, onBack, onChanged }: { loanId: string
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loanId]);
 
+  // In-app two-step confirmation: React Native Web's Alert.alert() is a no-op,
+  // so the confirm dialog must be real UI on every platform.
   const repay = async () => {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       const res = await api.repayLoan(loanId);
       setLoan(res.loan);
+      setConfirming(false);
+      setNotice("Marked as repaid.");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Repayment failed");
@@ -43,28 +64,37 @@ export function LoanDetailScreen({ loanId, onBack, onChanged }: { loanId: string
     }
   };
 
-  const confirmRepay = () => {
-    Alert.alert("Mark as repaid?", "This records that your friend repaid the full amount.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Mark repaid", style: "default", onPress: repay },
-    ]);
+  const pickReceipt = async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      // Native only: the web picker needs no media-library permission.
+      if (Platform.OS !== "web") {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!perm.granted) {
+          setError("Photo permission is needed to attach a receipt.");
+          return;
+        }
+      }
+      const picked = await ImagePicker.launchImageLibraryAsync({ mediaTypes: "images", quality: 0.8 });
+      if (picked.canceled || !picked.assets[0]) return;
+      const asset = picked.assets[0];
+      const { name, mime } = receiptName(asset);
+      setPending({ uri: asset.uri, name, mime });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open the photo picker");
+    }
   };
 
-  const attachReceipt = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      setError("Photo permission is needed to attach a receipt.");
-      return;
-    }
-    const picked = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
-    if (picked.canceled || !picked.assets[0]) return;
-    const asset = picked.assets[0];
+  const uploadPending = async () => {
+    if (!pending || uploading) return;
     setUploading(true);
     setError(null);
     try {
-      const name = asset.fileName ?? `receipt-${Date.now()}.jpg`;
-      const updated = await api.uploadReceipt(loanId, asset.uri, name, asset.mimeType ?? "image/jpeg");
+      const updated = await api.uploadReceipt(loanId, pending.uri, pending.name, pending.mime);
       setLoan(updated);
+      setPending(null);
+      setNotice("Receipt uploaded.");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Receipt upload failed");
@@ -106,8 +136,18 @@ export function LoanDetailScreen({ loanId, onBack, onChanged }: { loanId: string
         <Row k="Status" v={loan.status === "REPAID" ? "Repaid" : loan.overdue ? "Pending — overdue" : "Pending"} />
         {loan.repaidAt && <Row k="Repaid on" v={new Date(loan.repaidAt).toLocaleString("en-IN")} />}
         {!!error && <Text style={styles.error}>{error}</Text>}
+        {!!notice && <Text style={styles.notice}>{notice}</Text>}
         {loan.status === "PENDING" ? (
-          <Button title="Mark as repaid" onPress={confirmRepay} loading={busy} />
+          confirming ? (
+            <>
+              <Text style={styles.confirmText}>Mark this loan as fully repaid?</Text>
+              <Button title="Confirm repayment" onPress={repay} loading={busy} />
+              <View style={{ height: 8 }} />
+              <Button title="Cancel" secondary onPress={() => setConfirming(false)} disabled={busy} />
+            </>
+          ) : (
+            <Button title="Mark as repaid" onPress={() => { setError(null); setNotice(null); setConfirming(true); }} />
+          )
         ) : (
           <Text style={styles.repaidNote}>This loan is fully repaid. No further action needed.</Text>
         )}
@@ -115,13 +155,26 @@ export function LoanDetailScreen({ loanId, onBack, onChanged }: { loanId: string
 
       <Card style={{ marginTop: 12 }}>
         <Text style={styles.section}>Receipt</Text>
-        {receipt ? (
-          <Image source={{ uri: receipt }} style={styles.receipt} resizeMode="contain" />
+        {pending ? (
+          <>
+            <Text style={styles.muted}>Preview — not uploaded yet.</Text>
+            <Image source={{ uri: pending.uri }} style={styles.receipt} resizeMode="contain" />
+            <View style={{ height: 10 }} />
+            <Button title="Upload this receipt" onPress={uploadPending} loading={uploading} />
+            <View style={{ height: 8 }} />
+            <Button title="Choose a different photo" secondary onPress={pickReceipt} disabled={uploading} />
+          </>
         ) : (
-          <Text style={styles.muted}>No receipt attached.</Text>
+          <>
+            {receipt ? (
+              <Image source={{ uri: receipt }} style={styles.receipt} resizeMode="contain" />
+            ) : (
+              <Text style={styles.muted}>No receipt attached.</Text>
+            )}
+            <View style={{ height: 10 }} />
+            <Button title="Attach receipt photo" secondary onPress={pickReceipt} />
+          </>
         )}
-        <View style={{ height: 10 }} />
-        <Button title={uploading ? "Uploading…" : "Attach receipt photo"} secondary onPress={attachReceipt} disabled={uploading} />
       </Card>
     </ScrollView>
   );
@@ -147,6 +200,8 @@ const styles = StyleSheet.create({
   k: { color: theme.colors.muted },
   v: { fontWeight: "600", color: theme.colors.text },
   error: { color: theme.colors.danger, marginVertical: 8 },
+  notice: { color: theme.colors.success, marginVertical: 8, fontWeight: "600" },
+  confirmText: { color: theme.colors.text, fontWeight: "600", marginVertical: 8 },
   repaidNote: { color: theme.colors.success, fontWeight: "600", marginTop: 8 },
   section: { fontSize: 16, fontWeight: "700", marginBottom: 8, color: theme.colors.text },
   muted: { color: theme.colors.muted },

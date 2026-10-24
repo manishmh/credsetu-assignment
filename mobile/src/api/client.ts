@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { getToken } from "../auth/session";
 
 // Physical phones cannot reach the dev machine via localhost — set this to
@@ -34,6 +35,16 @@ function errMsg(body: unknown, fallback: string): string {
   return fallback;
 }
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit, auth = true): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (auth) {
@@ -44,10 +55,13 @@ async function req<T>(path: string, init?: RequestInit, auth = true): Promise<T>
   try {
     res = await fetch(`${API_URL}${path}`, { ...init, headers: { ...headers, ...(init?.headers as object) } });
   } catch {
-    throw new Error(`Cannot reach server at ${API_URL}. On a physical phone set EXPO_PUBLIC_API_URL to your computer's LAN IP (see README).`);
+    throw new ApiError(0, `Cannot reach server at ${API_URL}. On a physical phone set EXPO_PUBLIC_API_URL to your computer's LAN IP (see README).`, "NETWORK_ERROR");
   }
   const body = (await res.json().catch(() => ({}))) as unknown;
-  if (!res.ok) throw new Error(errMsg(body, `Request failed (${res.status})`));
+  if (!res.ok) {
+    const e = (body as { error?: { message?: string; code?: string } }).error;
+    throw new ApiError(res.status, e?.message ?? errMsg(body, `Request failed (${res.status})`), e?.code);
+  }
   return body as T;
 }
 
@@ -62,10 +76,27 @@ export const api = {
   repayLoan: (id: string) => req<{ ok: boolean; loan: Loan }>(`/api/loans/${id}/repay`, { method: "PATCH" }),
   deleteLoan: (id: string) => req<{ ok: boolean }>(`/api/loans/${id}`, { method: "DELETE" }),
   summary: () => req<{ ok: boolean; summary: Summary }>("/api/summary"),
+  // Multipart upload. No manual Content-Type: the runtime generates the boundary.
+  // Web: the { uri, name, type } stub serializes to "[object Object]" (no file
+  // part -> backend 400), so resolve the blob: URL to a real Blob first.
+  // Native: keep the { uri, name, type } shape the RN networking stack expects.
   uploadReceipt: async (id: string, uri: string, name: string, mime: string): Promise<Loan> => {
     const token = await getToken();
     const form = new FormData();
-    form.append("receipt", { uri, name, type: mime } as unknown as Blob);
+    if (Platform.OS === "web") {
+      let blob: Blob;
+      try {
+        blob = await (await fetch(uri)).blob();
+      } catch {
+        throw new ApiError(0, "Could not read the selected image. Please pick another photo.", "FILE_READ_ERROR");
+      }
+      if (!blob || blob.size === 0) {
+        throw new ApiError(0, "The selected image is empty. Please pick another photo.", "EMPTY_FILE");
+      }
+      form.append("receipt", blob, name);
+    } else {
+      form.append("receipt", { uri, name, type: mime } as unknown as Blob);
+    }
     let res: Response;
     try {
       res = await fetch(`${API_URL}/api/loans/${id}/receipt`, {
@@ -74,10 +105,10 @@ export const api = {
         body: form,
       });
     } catch {
-      throw new Error(`Cannot reach server at ${API_URL}.`);
+      throw new ApiError(0, `Cannot reach server at ${API_URL}.`, "NETWORK_ERROR");
     }
-    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; loan?: Loan; error?: { message?: string } };
-    if (!res.ok) throw new Error(body.error?.message ?? `Upload failed (${res.status})`);
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; loan?: Loan; error?: { message?: string; code?: string } };
+    if (!res.ok) throw new ApiError(res.status, body.error?.message ?? `Upload failed (${res.status})`, body.error?.code);
     return body.loan as Loan;
   },
   receiptUrl: (path: string | null) => (path ? `${API_URL}${path}` : null),

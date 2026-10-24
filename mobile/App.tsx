@@ -1,7 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useEffect, useState } from "react";
 import { SafeAreaView, StyleSheet } from "react-native";
-import { api, Loan, Summary } from "./src/api/client";
+import { ApiError, api, Loan, Summary } from "./src/api/client";
 import { clearToken, getToken } from "./src/auth/session";
 import { AddLoanScreen } from "./src/screens/AddLoanScreen";
 import { DashboardScreen } from "./src/screens/DashboardScreen";
@@ -20,6 +20,14 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const logout = useCallback(async () => {
+    await clearToken();
+    setAuthed(false);
+    setSummary(null);
+    setLoans([]);
+    setRoute({ name: "dashboard" });
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -28,27 +36,25 @@ export default function App() {
       setSummary(s.summary);
       setLoans(l.loans);
     } catch (e) {
+      // Expired/invalid restored token: drop the session and go back to login.
+      if (e instanceof ApiError && e.status === 401) {
+        await logout();
+        return;
+      }
       setError(e instanceof Error ? e.message : "Failed to load data");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [logout]);
 
   useEffect(() => {
+    // Async boot: don't render protected screens until restoration finishes.
     getToken().then((t) => {
       setAuthed(!!t);
       setBooting(false);
       if (t) refresh();
     });
   }, [refresh]);
-
-  const logout = async () => {
-    await clearToken();
-    setAuthed(false);
-    setSummary(null);
-    setLoans([]);
-    setRoute({ name: "dashboard" });
-  };
 
   if (booting) return <SafeAreaView style={styles.safe} />;
 

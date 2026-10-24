@@ -1,8 +1,11 @@
 import { PrismaClient } from "@prisma/client";
+import jwt from "jsonwebtoken";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { hashOtp } from "../src/validation.js";
+
+const JWT_SECRET = process.env.JWT_SECRET ?? "dev-only-secret-change-me";
 
 const prisma = new PrismaClient();
 const app = createApp();
@@ -123,6 +126,18 @@ describe("loans + summary", () => {
     expect((await request(app).delete(`/api/loans/${id}`).set("Authorization", `Bearer ${tokenB}`)).status).toBe(404);
     expect(((await request(app).get("/api/loans").set("Authorization", `Bearer ${tokenB}`)).body.loans)).toHaveLength(0);
   });
+  it("rejects an expired JWT with 401", async () => {
+    const user = await prisma.user.create({ data: { phone: PHONE_A } });
+    const expired = jwt.sign({ phone: PHONE_A }, JWT_SECRET, { subject: user.id, expiresIn: -10 });
+    const res = await request(app).get("/api/loans").set("Authorization", `Bearer ${expired}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("UNAUTHORIZED");
+  });
+  it("repay on unknown id is 404", async () => {
+    const token = await loginAs(PHONE_A);
+    const res = await request(app).patch("/api/loans/00000000-0000-0000-0000-000000000000/repay").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(404);
+  });
   it("summary matches ledger math", async () => {
     const token = await loginAs(PHONE_A);
     const auth = { Authorization: `Bearer ${token}` };
@@ -133,5 +148,73 @@ describe("loans + summary", () => {
     await request(app).patch(`/api/loans/${r.body.loan.id}/repay`).set(auth);
     const s = (await request(app).get("/api/summary").set(auth)).body.summary;
     expect(s).toMatchObject({ totalLent: "350.00", totalRepaid: "50.00", outstandingAmount: "300.00", overdueAmount: "100.00", pendingCount: 2, repaidCount: 1 });
+  });
+});
+
+describe("receipt upload", () => {
+  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+
+  async function loanFor(token: string): Promise<string> {
+    const res = await request(app)
+      .post("/api/loans")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ friendName: "Rcpt", amount: "75.50", dueDate: "2099-01-01" });
+    expect(res.status).toBe(201);
+    return res.body.loan.id as string;
+  }
+
+  it("uploads a receipt and persists receiptUrl", async () => {
+    const token = await loginAs(PHONE_A);
+    const id = await loanFor(token);
+    const up = await request(app)
+      .post(`/api/loans/${id}/receipt`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("receipt", pngHeader, { filename: "r.png", contentType: "image/png" });
+    expect(up.status).toBe(200);
+    expect(up.body.loan.receiptUrl).toMatch(/^\/uploads\/.+\.png$/);
+
+    // Reference survives reload: refetch the loan and GET the file.
+    const again = await request(app).get(`/api/loans/${id}`).set("Authorization", `Bearer ${token}`);
+    expect(again.body.loan.receiptUrl).toBe(up.body.loan.receiptUrl);
+    const file = await request(app).get(up.body.loan.receiptUrl);
+    expect(file.status).toBe(200);
+  });
+  it("rejects a missing file with 400 MISSING_FILE", async () => {
+    const token = await loginAs(PHONE_A);
+    const id = await loanFor(token);
+    const res = await request(app).post(`/api/loans/${id}/receipt`).set("Authorization", `Bearer ${token}`).field("receipt", "[object Object]");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("MISSING_FILE");
+  });
+  it("rejects an invalid type with 400 INVALID_FILE_TYPE", async () => {
+    const token = await loginAs(PHONE_A);
+    const id = await loanFor(token);
+    const res = await request(app)
+      .post(`/api/loans/${id}/receipt`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("receipt", Buffer.from("hello"), { filename: "r.txt", contentType: "text/plain" });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_FILE_TYPE");
+  });
+  it("rejects an oversized file with 413 FILE_TOO_LARGE", async () => {
+    const token = await loginAs(PHONE_A);
+    const id = await loanFor(token);
+    const big = Buffer.alloc(6 * 1024 * 1024, 0x41);
+    const res = await request(app)
+      .post(`/api/loans/${id}/receipt`)
+      .set("Authorization", `Bearer ${token}`)
+      .attach("receipt", big, { filename: "big.png", contentType: "image/png" });
+    expect(res.status).toBe(413);
+    expect(res.body.error.code).toBe("FILE_TOO_LARGE");
+  });
+  it("refuses cross-user upload with 404", async () => {
+    const tokenA = await loginAs(PHONE_A);
+    const tokenB = await loginAs(PHONE_B);
+    const id = await loanFor(tokenA);
+    const res = await request(app)
+      .post(`/api/loans/${id}/receipt`)
+      .set("Authorization", `Bearer ${tokenB}`)
+      .attach("receipt", pngHeader, { filename: "r.png", contentType: "image/png" });
+    expect(res.status).toBe(404);
   });
 });

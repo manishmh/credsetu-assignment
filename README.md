@@ -117,7 +117,7 @@ Base `http://localhost:4000`. Errors: `{ "error": { "code": "...", "message": "�
 | `GET /api/loans/:id` | — | 404 if not yours |
 | `PATCH /api/loans/:id/repay` | — | idempotent; `{ alreadyRepaid:true }` on repeat |
 | `DELETE /api/loans/:id` | — | optional deletion |
-| `POST /api/loans/:id/receipt` | multipart `receipt` | JPEG/PNG/WebP/HEIC/PDF ≤ 5 MB → `{ loan }` with `receiptUrl` |
+| `POST /api/loans/:id/receipt` | multipart `receipt` | JPEG/PNG/WebP/HEIC/PDF ≤ 5 MB → `{ loan }` with `receiptUrl` (errors: `MISSING_FILE` 400, `INVALID_FILE_TYPE` 400, `FILE_TOO_LARGE` 413, `NOT_FOUND` 404 cross-user) |
 | `GET /api/summary` | — | see below |
 | `GET /uploads/<file>` | — | static receipt serving |
 
@@ -157,7 +157,13 @@ npx tsc --noEmit
 npx expo export --platform android                                  # verifies Metro bundle
 ```
 
-Latest run: **20/20 vitest pass** (10 unit: phone validation, integer-cents math, summary incl. due-today/yesterday boundary; 10 integration: OTP success/wrong/expired/replay/lockout, auth guard, amount rejection, create→repay idempotency, cross-user 404s, summary math), `tsc` clean in both projects, Android bundle exports (~1.6 MB), live curl E2E (OTP → JWT → 2 loans → summary + receipt upload + static serve) all 200s. Not configured: ESLint (omitted deliberately — `tsc` + tests are the gates).
+Latest run: **27/27 vitest pass** (10 unit + 17 integration: OTP flows, auth guard, expired-JWT 401, repay incl. idempotent re-repay and unknown-id 404, cross-user 404s, summary math, receipt success + persistence + `MISSING_FILE`/`INVALID_FILE_TYPE`/`FILE_TOO_LARGE`/cross-user cases), `tsc` clean in both projects, Android + Web bundles export, live curl E2E all green. Not configured: ESLint (omitted deliberately — `tsc` + tests are the gates).
+
+## Session persistence (web vs native)
+
+- **Native (Expo Go / device):** JWT is stored in `expo-secure-store` (hardware-backed keychain/keystore where available) and restored before any protected screen renders. Logout clears it.
+- **Web (`npx expo start --web`):** `SecureStore` has no web implementation, so the app stores the JWT in `localStorage` (`mobile/src/auth/session.ts`) and restores it on refresh; expired tokens (401) drop back to login. **Caveat:** `localStorage` is readable by any script on the origin, so an XSS flaw could steal the token — it does NOT provide native secure-storage guarantees. Acceptable for this local demo; production web apps should use `httpOnly` cookies + CSRF protection instead of a JS-readable token. The token is never placed in a URL or logged.
+- **Browser dev workflow:** `cd mobile && npx expo start --web` (or press `w` in the Expo CLI), with `EXPO_PUBLIC_API_URL=http://localhost:4000`.
 
 ## Troubleshooting
 

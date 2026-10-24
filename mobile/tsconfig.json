@@ -10,5 +10,10 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["App.tsx", "index.js", "src/**/*"]
+  "include": [
+    "App.tsx",
+    "index.js",
+    "src/**/*"
+  ],
+  "extends": "expo/tsconfig.base"
 }
